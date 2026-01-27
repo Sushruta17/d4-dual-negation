@@ -56,6 +56,7 @@
 #include "DecomposableAndNode.hh"
 #include "KromFormula.hh"
 #include "PCNode.hh"
+#include "NotNode.hh"
 
 template<class T> class DAG
 {
