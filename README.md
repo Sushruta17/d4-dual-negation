@@ -1,125 +1,142 @@
-Authors: Lagniez Jean-Marie
-Date: 2017/07/09
+# d4-dual-negation
 
-# How to compile
+A knowledge compilation tool that compiles propositional CNF formulas into **POG (Partitioned Operation Graph)** representations using a **dual-negation** strategy. Based on the [d4 compiler](https://github.com/crillab/d4) from Univ. Artois & CNRS.
 
-To compile and print out the help please use the following command lines:
+---
+
+## What is Dual-Negation?
+
+Standard d-DNNF compilation recursively decomposes both branches of every decision. The **dual-negation** approach exploits the identity **φ ≡ ¬(¬φ)**: when clauses remain after a decision, instead of full recursive compilation, we **negate** the remaining formula and wrap it with a **NOT node**. This often produces smaller representations since the negated formula typically reduces to simple unit conjunctions.
+
+---
+
+## Building
+
+### Prerequisites
+
+- **g++** with C++11 support
+- **Boost** (multiprecision, GMP backend)
+- **GMP** library (`libgmpxx`, `libgmp`)
+- **zlib**
+
+### Compile
 
 ```bash
-make -j8
-./d4 --help
+make -j8      # Standard build (with debug symbols)
 ```
 
-To compile in debug mode (make possible the use of gdb and valgrind) and print out the help  please use:
+### Clean
 
 ```bash
-make -j8 d
-./d4_debug --help
+make clean
 ```
 
-To compile in profile mode (make possible to use gprof) and print out the help please use:
+---
+
+## Usage
+
+### POG Compilation
 
 ```bash
-make -j8 p
-./d4_profil --help
+./d4 -dDNNF <input.cnf>
 ```
 
-
-To compile in static mode and print out the help please use:
+### POG Compilation with Output File
 
 ```bash
-make -j8 rs
-./d4_static --help
+./d4 -dDNNF <input.cnf> -out=<output.nnf>
 ```
 
-# How to run
-
-To run the model counter:
+### Example
 
 ```bash
-./d4 -mc benchTest/littleTest.cnf
+# Create a test CNF: (x₁ ∨ x₂) ∧ (¬x₁ ∨ x₃ ∨ x₄)
+echo "p cnf 4 2
+1 2 0
+-1 3 4 0" > test.cnf
+
+# Compile and write output
+./d4 -dDNNF test.cnf -out=result.nnf
+
+# View the result
+cat result.nnf
 ```
 
-To run the dDNNF compiler:
-
-```bash
-./d4 -dDNNF benchTest/littleTest.cnf
+**Output:**
 ```
-
-To get the resulting decision-DNNF representation in file /tmp/test.nnf please use:
-
-```bash
-./d4 -dDNNF benchTest/littleTest.cnf -out=/tmp/test.nnf
-cat /tmp/test.nnf
 o 1 0
 o 2 0
-o 3 0
-t 4 0
-3 4 -2 3 0
-3 4 2 0
-2 3 -1 0
+t 3 0
+n 4 0
+4 3 -3 -4 0
+2 3 -1 2 0
 2 4 1 0
 1 2 0
 ```
 
+---
 
-Note that the format used now is an extension of the previous format
-(as defined in the archive of c2d available from http://reasoning.cs.ucla.edu/c2d/).
-The management of propagated literals has been improved in the new format, where
-both nodes and arcs are represented. When a literal becomes true at some node
-there is no more need to create an AND node and a literal node to capture it.
-Instead the literal is attached to the arc connecting the node with its father.
-Each line represents a node or an arc, and is terminated by 0.
-When a line represents a node it starts with a node type and is followed by its index.
-Here are the node types:
+## Output Format (`.nnf`)
 
-    o, for an OR node
-    f, for a false leaf
-    t, for a true leaf
-    a, for an AND node (not present in this example)
+The `.nnf` file uses a line-based encoding for the compiled DAG:
 
-    The second argument just after the type of node is its index.
+### Node Declarations
 
-    In the example above the decision-DNNF representation has
-    3 OR nodes (1, 2 and 3) and 1 true node (4).
+| Line Format | Node Type | Description |
+|-------------|-----------|-------------|
+| `o <id> 0` | **OR** | Deterministic OR (decision) node |
+| `a <id> 0` | **AND** | Decomposable AND node (independent components) |
+| `t <id> 0` | **TRUE** | Terminal true node |
+| `f <id> 0` | **FALSE** | Terminal false node |
+| `n <id> 0` | **NOT** | Negation node (POG extension) |
 
-As expected arcs are used to connect the nodes.
-In the file .nnf, arcs are represented by lines starting with a node index
-(a positive integer, the source node), followed by another node index
-(a positive integer, the target node), and eventually a sequence of literals
-that represents the unit literals that become true at the target node.
+### Edge Lines
 
-
-    In the example, 3 4 -2 3 0 means that OR node of index 3 is connected to the
-    true node of index 4 and the literals -2 and 3 are set to true.
-
-
-To get the resulting certified decision-DNNF representation in file /tmp/test.nnf enhanced
-with the drat proof saved in /tmp/test.drat, please use:
-
-```bash
-./d4 -dDNNF benchTest/littleTest.cnf -out=/tmp/test.nnf -drat=/tmp/test.drat
-cat /tmp/test.nnf
-o 1 1 0
-o 2 2 0
-o 3 2 1 0
-t 4 0
-3 4 2 -2 3 0
-3 4 2 2 0
-2 3 2 -1 0
-2 4 2 1 0
-1 2 2 0
-cat /tmp/test.drat
-1 2 3 0
-d 1 2 3 0
+```
+<parent_id> <child_id> <literal₁> <literal₂> ... 0
 ```
 
-The format used for certifying the d-DNNF has been sligthly modified in order to gather the clauses that have been used to propagate the unit literals.
-Since literals are always associated to decision nodes, this information has been added on these kind of nodes.
-More precisely, just after the index of the node we can now find the number of branches the node has.
-Then the indexes of the clauses, following the order in the drat file, are given.
+Each edge connects a parent node to a child, annotated with **unit literals** — the decision literal and any implied literals from Boolean Constraint Propagation (BCP).
+
+**Literal encoding:** Positive integer = positive literal, negative integer = negated literal. For example, `-1 2` means x₁=false and x₂=true.
+
+### Reading the Output
+
+For the example `(x₁ ∨ x₂) ∧ (¬x₁ ∨ x₃ ∨ x₄)`:
+
+```
+o 2 0              ← Decision node on x₁
+t 3 0              ← TRUE terminal
+n 4 0              ← NOT node (dual-negation)
+4 3 -3 -4 0        ← ¬x₃ ∧ ¬x₄ → TRUE
+2 3 -1 2 0         ← x₁=false, x₂=true (BCP implied) → TRUE
+2 4 1 0            ← x₁=true → NOT(¬x₃ ∧ ¬x₄) = (x₃ ∨ x₄)
+```
+
+**Interpretation:**
+- When **x₁ = false**: BCP forces x₂ = true, all clauses satisfied → TRUE
+- When **x₁ = true**: Clause 2 `(x₃ ∨ x₄)` remains → negated to `(¬x₃ ∧ ¬x₄)`, wrapped with NOT
+
+---
 
 
-    In the example, 0 1 1 0 means that we are considering an OR node of index 1 which is connected to 1 node. 0 3 2 1 0 means that we are considering an OR node which is connected with 2 other 
-    nodes and such that the clause with the index 1 has been used to progatate some literals on some branches connected to it.
-    
+## Input Format (DIMACS CNF)
+
+Standard DIMACS CNF format:
+
+```
+p cnf <num_variables> <num_clauses>
+<lit₁> <lit₂> ... 0
+<lit₁> <lit₂> ... 0
+...
+```
+
+- Variables are numbered `1` to `n`
+- Positive literal: variable number (e.g., `3` for x₃)
+- Negative literal: negated variable (e.g., `-3` for ¬x₃)
+- Each clause ends with `0`
+
+---
+
+
+Original d4 compiler: Copyright (C) 2020 Univ. Artois & CNRS.

@@ -407,17 +407,138 @@ private:
   }
 
   /**
+     Lightweight recursive helper for compiling small CNF sub-formulas.
+     Used to compile negated formulas under NOT nodes.
+
+     @param[in] ss - sub-solver with the negated CNF loaded
+     @param[in] vars - variables appearing in the CNF
+     @return compiled DAG for the sub-formula
+  */
+  DAG<T> *compileSmallCNF_(Solver &ss, vec<Var> &vars) {
+    // Find an unassigned variable
+    Var pickV = var_Undef;
+    for (int i = 0; i < vars.size(); i++) {
+      if (ss.value(vars[i]) == l_Undef) {
+        pickV = vars[i];
+        break;
+      }
+    }
+
+    if (pickV == var_Undef)
+      return globalTrueNode; // All variables assigned, formula satisfied
+
+    Lit pickL = mkLit(pickV);
+    onTheBranch bPos, bNeg;
+
+    // === Positive branch ===
+    ss.assumptions.push(pickL);
+    DAG<T> *pos;
+    if (!ss.solveWithAssumptions()) {
+      pos = globalFalseNode;
+      bPos.units.push(pickL);
+    } else {
+      // Collect decision + propagated literals
+      bPos.units.push(pickL);
+      for (int i = 0; i < vars.size(); i++) {
+        if (vars[i] == pickV)
+          continue;
+        if (ss.value(vars[i]) != l_Undef)
+          bPos.units.push(mkLit(vars[i], ss.value(vars[i]) == l_False));
+      }
+      pos = compileSmallCNF_(ss, vars);
+    }
+    ss.assumptions.pop();
+    ss.cancelUntil(ss.assumptions.size());
+
+    // === Negative branch ===
+    ss.assumptions.push(~pickL);
+    DAG<T> *neg;
+    if (!ss.solveWithAssumptions()) {
+      neg = globalFalseNode;
+      bNeg.units.push(~pickL);
+    } else {
+      bNeg.units.push(~pickL);
+      for (int i = 0; i < vars.size(); i++) {
+        if (vars[i] == pickV)
+          continue;
+        if (ss.value(vars[i]) != l_Undef)
+          bNeg.units.push(mkLit(vars[i], ss.value(vars[i]) == l_False));
+      }
+      neg = compileSmallCNF_(ss, vars);
+    }
+    ss.assumptions.pop();
+    ss.cancelUntil(ss.assumptions.size());
+
+    vec<Var> emptyFree;
+    return new BinaryDeterministicOrNode<T>(pos, bPos.units, emptyFree, neg,
+                                            bNeg.units, emptyFree);
+  }
+
+  /**
+     Compile a small CNF sub-formula using a dedicated sub-solver.
+     Creates a new Solver instance, loads the clauses, and recursively compiles.
+
+     Used for the dual-negation strategy: when multiple clauses remain,
+     we negate the remaining CNF (producing a new CNF via De Morgan +
+     distribution) and compile it here. The result is then wrapped with a NOT
+     node.
+
+     @param[in] cnfClauses - the CNF clauses to compile
+     @return compiled DAG for the sub-formula
+  */
+  DAG<T> *compileSmallCNF(vec<vec<Lit>> &cnfClauses) {
+    if (cnfClauses.size() == 0)
+      return globalTrueNode;
+
+    // Find all variables and max variable index
+    int maxVar = 0;
+    vec<bool> seen;
+    vec<Var> allVars;
+
+    for (int i = 0; i < cnfClauses.size(); i++)
+      for (int j = 0; j < cnfClauses[i].size(); j++)
+        if (var(cnfClauses[i][j]) + 1 > maxVar)
+          maxVar = var(cnfClauses[i][j]) + 1;
+
+    seen.initialize(maxVar, false);
+    for (int i = 0; i < cnfClauses.size(); i++)
+      for (int j = 0; j < cnfClauses[i].size(); j++) {
+        Var v = var(cnfClauses[i][j]);
+        if (!seen[v]) {
+          seen[v] = true;
+          allVars.push(v);
+        }
+      }
+
+    // Create a lightweight sub-solver
+    Solver subSolver(NULL);
+    for (int i = 0; i < maxVar; i++)
+      subSolver.newVar();
+
+    for (int i = 0; i < cnfClauses.size(); i++) {
+      vec<Lit> cl;
+      cnfClauses[i].copyTo(cl);
+      subSolver.addClause_(cl);
+    }
+
+    // Check satisfiability
+    if (!subSolver.solveWithAssumptions())
+      return globalFalseNode;
+
+    return compileSmallCNF_(subSolver, allVars);
+  }
+
+  /**
      This function select a variable and compile a decision node.
 
-     DUAL-NEGATION STRATEGY (PROPERLY IMPLEMENTED):
+     DUAL-NEGATION STRATEGY:
      At each decision branch:
      1. Condition the CNF under the assigned literal
      2. If all clauses are satisfied → return TRUE node directly
      3. If remaining clauses exist:
-        a. Extract remaining clauses
-        b. Negate the remaining CNF (using De Morgan's laws)
-        c. Compile the negated CNF
-        d. Wrap the result with a NOT node
+        a. For single clause: negate literals, wrap with NOT node directly
+        b. For multiple clauses: negate CNF (DNF→CNF), compile negated CNF,
+           wrap with NOT node
 
      @param[in] connected, the set of variable present in the current problem
      \return the compiled formula
@@ -483,27 +604,51 @@ private:
                                       bNeg, fromCacheNeg, idxReason);
     }
 
-    // Get conditioned clauses and collect units BEFORE resetting solver
+    // Get conditioned clauses (remaining after conditioning)
     vec<vec<Lit>> conditionedPos;
     getConditionedClauses(conditionedPos, connected);
-    bPos.units.clear();
-    s.collectUnit(connected, bPos.units, l);
-    bPos.free.clear();
-
-    (s.assumptions).pop();
-    (s.cancelUntil)((s.assumptions).size());
 
     // DUAL-NEGATION for positive branch
     DAG<T> *pos;
     if (conditionedPos.size() == 0) {
       // All clauses satisfied -> TRUE directly
+      bPos.units.clear();
+      s.collectUnit(connected, bPos.units, l);
+      bPos.free.clear();
+      (s.assumptions).pop();
+      (s.cancelUntil)((s.assumptions).size());
       pos = globalTrueNode;
       fromCachePos = false;
-    } else {
-      // Remaining clauses exist: compile the NEGATED formula, wrap with NOT
-      DAG<T> *negatedCompiled = compileNegatedCNF(conditionedPos);
+    } else if (conditionedPos.size() == 1) {
+      // Single remaining clause: NOT node with negated literals directly
+      // e.g., remaining (x₃ ∨ x₄) → NOT(TRUE, [¬x₃, ¬x₄])
+      bPos.units.clear();
+      s.collectUnit(connected, bPos.units, l);
+      bPos.free.clear();
+      (s.assumptions).pop();
+      (s.cancelUntil)((s.assumptions).size());
+
       int numFreeVars = countFreeVarsInClauses(conditionedPos);
-      pos = new notNode<T>(negatedCompiled, numFreeVars);
+      vec<Lit> negatedLits;
+      for (int j = 0; j < conditionedPos[0].size(); j++)
+        negatedLits.push(~conditionedPos[0][j]);
+      pos = new notNode<T>(globalTrueNode, negatedLits, numFreeVars);
+      nbNotNode++;
+      fromCachePos = false;
+    } else {
+      // Multiple remaining clauses: negate CNF (DNF→CNF), compile, wrap with
+      // NOT This always produces a NOT node in the output
+      bPos.units.clear();
+      s.collectUnit(connected, bPos.units, l);
+      bPos.free.clear();
+      (s.assumptions).pop();
+      (s.cancelUntil)((s.assumptions).size());
+
+      int numFreeVars = countFreeVarsInClauses(conditionedPos);
+      vec<vec<Lit>> negatedCNF;
+      negateCNF(conditionedPos, negatedCNF);
+      DAG<T> *compiledNeg = compileSmallCNF(negatedCNF);
+      pos = new notNode<T>(compiledNeg, numFreeVars);
       nbNotNode++;
       fromCachePos = false;
     }
@@ -522,27 +667,50 @@ private:
                                       bNeg, false, idxReason);
     }
 
-    // Get conditioned clauses and collect units BEFORE resetting solver
+    // Get conditioned clauses (remaining after conditioning)
     vec<vec<Lit>> conditionedNeg;
     getConditionedClauses(conditionedNeg, connected);
-    bNeg.units.clear();
-    s.collectUnit(connected, bNeg.units, ~l);
-    bNeg.free.clear();
-
-    (s.assumptions).pop();
-    (s.cancelUntil)((s.assumptions).size());
 
     // DUAL-NEGATION for negative branch
     DAG<T> *neg;
     if (conditionedNeg.size() == 0) {
       // All clauses satisfied -> TRUE directly
+      bNeg.units.clear();
+      s.collectUnit(connected, bNeg.units, ~l);
+      bNeg.free.clear();
+      (s.assumptions).pop();
+      (s.cancelUntil)((s.assumptions).size());
       neg = globalTrueNode;
       fromCacheNeg = false;
-    } else {
-      // Remaining clauses exist: compile the NEGATED formula, wrap with NOT
-      DAG<T> *negatedCompiled = compileNegatedCNF(conditionedNeg);
+    } else if (conditionedNeg.size() == 1) {
+      // Single remaining clause: NOT node with negated literals directly
+      bNeg.units.clear();
+      s.collectUnit(connected, bNeg.units, ~l);
+      bNeg.free.clear();
+      (s.assumptions).pop();
+      (s.cancelUntil)((s.assumptions).size());
+
       int numFreeVars = countFreeVarsInClauses(conditionedNeg);
-      neg = new notNode<T>(negatedCompiled, numFreeVars);
+      vec<Lit> negatedLits;
+      for (int j = 0; j < conditionedNeg[0].size(); j++)
+        negatedLits.push(~conditionedNeg[0][j]);
+      neg = new notNode<T>(globalTrueNode, negatedLits, numFreeVars);
+      nbNotNode++;
+      fromCacheNeg = false;
+    } else {
+      // Multiple remaining clauses: negate CNF (DNF→CNF), compile, wrap with
+      // NOT
+      bNeg.units.clear();
+      s.collectUnit(connected, bNeg.units, ~l);
+      bNeg.free.clear();
+      (s.assumptions).pop();
+      (s.cancelUntil)((s.assumptions).size());
+
+      int numFreeVars = countFreeVarsInClauses(conditionedNeg);
+      vec<vec<Lit>> negatedCNF;
+      negateCNF(conditionedNeg, negatedCNF);
+      DAG<T> *compiledNeg = compileSmallCNF(negatedCNF);
+      neg = new notNode<T>(compiledNeg, numFreeVars);
       nbNotNode++;
       fromCacheNeg = false;
     }

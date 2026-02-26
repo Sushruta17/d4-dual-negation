@@ -23,12 +23,16 @@
 template <class T> class DAG;
 
 /**
- * NOT node for d4-dual-negation algorithm.
- * Represents the logical negation of its child node.
+ * NOT node for d4-dual-negation (POG) algorithm.
+ * Represents the logical negation of its child subtree.
+ *
+ * The NOT node directly carries negated unit literals on its edge.
+ * For a remaining clause (x₃ ∨ x₄), the negation is (¬x₃ ∧ ¬x₄),
+ * so the NOT node connects to TRUE with literals -3 -4:
  *
  * Output format:
- *   n <node_id> 0           // NOT node declaration
- *   <not_id> <child_id> 0   // Edge to child
+ *   n <node_id> 0                          // NOT node declaration
+ *   <not_id> <child_id> <lit1> <lit2> ... 0  // Edge with negated literals
  */
 template <class T> class notNode : public DAG<T> {
   using DAG<T>::nbEdges;
@@ -39,13 +43,24 @@ template <class T> class notNode : public DAG<T> {
 public:
   DAG<T> *child;
   T nbModels;
-  int numFreeVars; // Number of free variables for complement calculation
+  int numFreeVars;  // Number of free variables for complement calculation
+  vec<Lit> negLits; // Negated unit literals carried directly by this node
 
   notNode() : child(nullptr), numFreeVars(0) {}
 
   notNode(DAG<T> *c) : child(c), numFreeVars(0) { nbEdges++; }
 
   notNode(DAG<T> *c, int nFreeVars) : child(c), numFreeVars(nFreeVars) {
+    nbEdges++;
+  }
+
+  /**
+   * Constructor with negated unit literals.
+   * The NOT node directly carries these literals on its edge to the child.
+   */
+  notNode(DAG<T> *c, vec<Lit> &lits, int nFreeVars)
+      : child(c), numFreeVars(nFreeVars) {
+    lits.copyTo(negLits);
     nbEdges++;
   }
 
@@ -62,23 +77,27 @@ public:
     stamp = globalStamp + idxOutputStruct + 1;
     int idxCurrent = ++idxOutputStruct;
 
-    // First print the NOT node declaration
+    // Print the NOT node declaration
     out << "n " << idxCurrent << " 0" << std::endl;
 
     // Print child node
     if (child)
       child->printNNF(out, certif);
 
-    // Print edge from NOT node to child
-    if (child)
-      out << idxCurrent << " " << child->getIdx() << " 0" << std::endl;
+    // Print edge from NOT node to child, with negated literals
+    if (child) {
+      out << idxCurrent << " " << child->getIdx();
+      for (int i = 0; i < negLits.size(); i++)
+        out << " " << readableLit(negLits[i]);
+      out << " 0" << std::endl;
+    }
   }
 
   inline bool isSAT(vec<Lit> &unitsLitBranches) {
     // NOT node is SAT if child is UNSAT
     if (child)
       return !child->isSAT(unitsLitBranches);
-    return true; // NOT of nothing is true
+    return true;
   }
 
   inline T computeNbModels() {
@@ -86,7 +105,6 @@ public:
       return nbModels;
     stamp = globalStamp;
 
-    // Simple pass-through (model counting needs separate work)
     if (child)
       nbModels = child->computeNbModels();
     else
