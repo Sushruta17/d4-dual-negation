@@ -407,14 +407,56 @@ private:
   }
 
   /**
-     Lightweight recursive helper for compiling small CNF sub-formulas.
-     Used to compile negated formulas under NOT nodes.
+     Get conditioned clauses from a sub-solver.
+     Checks which clauses remain unsatisfied given the solver's current
+     assignments. Unlike getConditionedClauses(), this works with any solver.
 
-     @param[in] ss - sub-solver with the negated CNF loaded
+     @param[out] conditioned - remaining unsatisfied clauses
+     @param[in] solver - the solver to check assignments against
+     @param[in] originalClauses - the clauses to condition
+  */
+  void getConditionedClausesFromSolver(vec<vec<Lit>> &conditioned,
+                                       Solver &solver,
+                                       vec<vec<Lit>> &originalClauses) {
+    conditioned.clear();
+    for (int i = 0; i < originalClauses.size(); i++) {
+      bool satisfied = false;
+      vec<Lit> remaining;
+      for (int j = 0; j < originalClauses[i].size(); j++) {
+        Lit lit = originalClauses[i][j];
+        lbool val = solver.value(lit);
+        if (val == l_True) {
+          satisfied = true;
+          break;
+        } else if (val == l_False)
+          continue;
+        else
+          remaining.push(lit);
+      }
+      if (!satisfied && remaining.size() > 0) {
+        conditioned.push();
+        remaining.copyTo(conditioned.last());
+      }
+    }
+  }
+
+  /**
+     Lightweight recursive helper for compiling small CNF sub-formulas.
+     Applies dual-negation recursively: after deciding on a variable,
+     checks remaining clauses and uses NOT nodes when applicable.
+
+     Fixes over the previous version:
+     - No redundant OR nodes for free variables (checks conditioned clauses)
+     - Dual-negation applied recursively (NOT nodes throughout)
+     - Only newly assigned literals on edges (no ancestor redundancy)
+
+     @param[in] ss - sub-solver with the CNF loaded
      @param[in] vars - variables appearing in the CNF
+     @param[in] cnfClauses - the original clauses for conditioning checks
      @return compiled DAG for the sub-formula
   */
-  DAG<T> *compileSmallCNF_(Solver &ss, vec<Var> &vars) {
+  DAG<T> *compileSmallCNF_(Solver &ss, vec<Var> &vars,
+                            vec<vec<Lit>> &cnfClauses) {
     // Find an unassigned variable
     Var pickV = var_Undef;
     for (int i = 0; i < vars.size(); i++) {
@@ -429,59 +471,108 @@ private:
 
     Lit pickL = mkLit(pickV);
     onTheBranch bPos, bNeg;
+    nbDecisionNode++;
+    nbCallCompile++;
 
-    // === Positive branch ===
+    // Record which vars are already assigned (from ancestor decisions)
+    vec<bool> wasAssigned;
+    wasAssigned.initialize(ss.nVars(), false);
+    for (int i = 0; i < vars.size(); i++)
+      if (ss.value(vars[i]) != l_Undef)
+        wasAssigned[vars[i]] = true;
+
+    // === POSITIVE BRANCH ===
     ss.assumptions.push(pickL);
     DAG<T> *pos;
     if (!ss.solveWithAssumptions()) {
       pos = globalFalseNode;
       bPos.units.push(pickL);
     } else {
-      // Collect decision + propagated literals
+      // Get remaining clauses after conditioning
+      vec<vec<Lit>> remaining;
+      getConditionedClausesFromSolver(remaining, ss, cnfClauses);
+
+      // Collect only NEWLY assigned literals (decision + fresh propagation)
       bPos.units.push(pickL);
       for (int i = 0; i < vars.size(); i++) {
         if (vars[i] == pickV)
           continue;
-        if (ss.value(vars[i]) != l_Undef)
+        if (!wasAssigned[vars[i]] && ss.value(vars[i]) != l_Undef)
           bPos.units.push(mkLit(vars[i], ss.value(vars[i]) == l_False));
       }
-      pos = compileSmallCNF_(ss, vars);
+
+      if (remaining.size() == 0) {
+        // All clauses satisfied → TRUE (no OR node for free variables!)
+        pos = globalTrueNode;
+      } else if (remaining.size() == 1) {
+        // Single remaining → NOT with negated literals (dual-negation!)
+        int numFreeVars = countFreeVarsInClauses(remaining);
+        vec<Lit> negatedLits;
+        for (int j = 0; j < remaining[0].size(); j++)
+          negatedLits.push(~remaining[0][j]);
+        pos = new notNode<T>(globalTrueNode, negatedLits, numFreeVars);
+        nbNotNode++;
+      } else {
+        // Multiple remaining → negateCNF + compileSmallCNF + NOT (recursive!)
+        int numFreeVars = countFreeVarsInClauses(remaining);
+        vec<vec<Lit>> negatedCNF;
+        negateCNF(remaining, negatedCNF);
+        DAG<T> *compiledNeg = compileSmallCNF(negatedCNF);
+        pos = new notNode<T>(compiledNeg, numFreeVars);
+        nbNotNode++;
+      }
     }
     ss.assumptions.pop();
     ss.cancelUntil(ss.assumptions.size());
 
-    // === Negative branch ===
+    // === NEGATIVE BRANCH ===
     ss.assumptions.push(~pickL);
     DAG<T> *neg;
     if (!ss.solveWithAssumptions()) {
       neg = globalFalseNode;
       bNeg.units.push(~pickL);
     } else {
+      vec<vec<Lit>> remaining;
+      getConditionedClausesFromSolver(remaining, ss, cnfClauses);
+
       bNeg.units.push(~pickL);
       for (int i = 0; i < vars.size(); i++) {
         if (vars[i] == pickV)
           continue;
-        if (ss.value(vars[i]) != l_Undef)
+        if (!wasAssigned[vars[i]] && ss.value(vars[i]) != l_Undef)
           bNeg.units.push(mkLit(vars[i], ss.value(vars[i]) == l_False));
       }
-      neg = compileSmallCNF_(ss, vars);
+
+      if (remaining.size() == 0) {
+        neg = globalTrueNode;
+      } else if (remaining.size() == 1) {
+        int numFreeVars = countFreeVarsInClauses(remaining);
+        vec<Lit> negatedLits;
+        for (int j = 0; j < remaining[0].size(); j++)
+          negatedLits.push(~remaining[0][j]);
+        neg = new notNode<T>(globalTrueNode, negatedLits, numFreeVars);
+        nbNotNode++;
+      } else {
+        int numFreeVars = countFreeVarsInClauses(remaining);
+        vec<vec<Lit>> negatedCNF;
+        negateCNF(remaining, negatedCNF);
+        DAG<T> *compiledNeg = compileSmallCNF(negatedCNF);
+        neg = new notNode<T>(compiledNeg, numFreeVars);
+        nbNotNode++;
+      }
     }
     ss.assumptions.pop();
     ss.cancelUntil(ss.assumptions.size());
 
     vec<Var> emptyFree;
     return new BinaryDeterministicOrNode<T>(pos, bPos.units, emptyFree, neg,
-                                            bNeg.units, emptyFree);
+                                           bNeg.units, emptyFree);
   }
 
   /**
      Compile a small CNF sub-formula using a dedicated sub-solver.
-     Creates a new Solver instance, loads the clauses, and recursively compiles.
-
-     Used for the dual-negation strategy: when multiple clauses remain,
-     we negate the remaining CNF (producing a new CNF via De Morgan +
-     distribution) and compile it here. The result is then wrapped with a NOT
-     node.
+     Creates a new Solver instance, loads the clauses, and recursively compiles
+     using dual-negation at every level.
 
      @param[in] cnfClauses - the CNF clauses to compile
      @return compiled DAG for the sub-formula
@@ -525,7 +616,30 @@ private:
     if (!subSolver.solveWithAssumptions())
       return globalFalseNode;
 
-    return compileSmallCNF_(subSolver, allVars);
+    // Reset to decision level 0 (keeps level-0 propagations like unit clauses)
+    subSolver.cancelUntil(0);
+
+    // Collect level-0 unit propagations (e.g., unit clauses like (x₄) → x₄=T)
+    // These are assigned at level 0 and survive cancelUntil(0), but would be
+    // invisible in the DAG output without explicit capture.
+    vec<Lit> level0Units;
+    for (int i = 0; i < allVars.size(); i++) {
+      if (subSolver.value(allVars[i]) != l_Undef)
+        level0Units.push(
+            mkLit(allVars[i], subSolver.value(allVars[i]) == l_False));
+    }
+
+    DAG<T> *compiled = compileSmallCNF_(subSolver, allVars, cnfClauses);
+
+    // If there were level-0 propagations, wrap with UnaryNode to capture them.
+    // e.g., for CNF (x₄) ∧ (x₅∨x₆): x₄=T is level-0, compiled = (x₅∨x₆).
+    // UnaryNode(compiled, [x₄]) represents x₄ ∧ (x₅∨x₆).
+    // Without this, NOT would see only (x₅∨x₆), losing x₄.
+    if (level0Units.size() > 0) {
+      vec<Var> freeVars;
+      return new UnaryNode<T>(compiled, level0Units, freeVars);
+    }
+    return compiled;
   }
 
   /**
@@ -762,11 +876,16 @@ private:
            minAffectedAndNode);
     printf("c \n");
     printf("c \033[33mGraph Information\033[0m\n");
-    printf("c Number of nodes: %d\n", DAG<T>::nbNodes);
-    printf("c Number of edges: %d\n", DAG<T>::nbEdges);
+    printf("c Number of nodes (total): %d\n", DAG<T>::nbNodes);
+    printf("c Number of edges (total): %d\n", DAG<T>::nbEdges);
     printf("c \n");
-    cache->printCacheInformation();
-    printf("c Final time: %lf\n", cpuTime());
+    printf("c \033[33mCache Information\033[0m\n");
+    printf("c Number of positive hit: %d\n", cache->getNbPositiveHit());
+    printf("c Number of negative hit: %d\n", cache->getNbNegativeHit());
+    printf("c \n");
+    printf("c \033[33mResource Usage\033[0m\n");
+    printf("c Final wall clock time: %lf s\n", cpuTime());
+    printf("c Peak memory used: %.0f MB\n", memUsedPeak());
     printf("c \n");
   } // printFinalStat
 
