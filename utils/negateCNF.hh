@@ -127,8 +127,17 @@ inline void negateCNF(vec<vec<Lit> > &inputCNF, vec<vec<Lit> > &outputCNF)
     {
       for(size_t l = 0; l < dnfTerms[t].size(); l++)
       {
+        Lit newLit = dnfTerms[t][l];
+        // Check against existing clause BEFORE merging
+        bool isTautology = false;
+        bool isDuplicate = false;
+        for(size_t k = 0; k < partialClauses[p].size(); k++) {
+          if (partialClauses[p][k] == ~newLit) { isTautology = true; break; }
+          if (partialClauses[p][k] == newLit)  { isDuplicate = true; break; }
+        }
+        if (isTautology) continue;  // skip tautological clause (contains l and ~l)
         std::vector<Lit> newClause = partialClauses[p];
-        newClause.push_back(dnfTerms[t][l]);
+        if (!isDuplicate) newClause.push_back(newLit);
         newPartials.push_back(newClause);
       }
     }

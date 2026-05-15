@@ -713,6 +713,7 @@ private:
       (s.cancelUntil)((s.assumptions).size());
 
       bPos.units.clear();
+      bPos.units.push(l);
       bPos.free.clear();
       return createObjectDecisionNode(globalFalseNode, bPos, false, negCompiled,
                                       bNeg, fromCacheNeg, idxReason);
@@ -776,6 +777,7 @@ private:
       (s.cancelUntil)((s.assumptions).size());
 
       bNeg.units.clear();
+      bNeg.units.push(~l);
       bNeg.free.clear();
       return createObjectDecisionNode(pos, bPos, fromCachePos, globalFalseNode,
                                       bNeg, false, idxReason);

@@ -105,9 +105,13 @@ public:
       return nbModels;
     stamp = globalStamp;
 
-    if (child)
-      nbModels = child->computeNbModels();
-    else
+    if (child) {
+      T childModels = child->computeNbModels();
+      T totalModels = T(1);
+      for (int i = 0; i < numFreeVars; i++)
+        totalModels *= T(2);  // 2^numFreeVars
+      nbModels = totalModels - childModels;  // complement
+    } else
       nbModels = 0;
 
     return nbModels;
